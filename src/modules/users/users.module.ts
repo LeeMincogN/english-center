@@ -1,0 +1,27 @@
+import { Module } from '@nestjs/common';
+import { UsersService } from 'modules/users/users.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserEntity } from 'modules/users/entities/user.entity';
+import { StudentEntity } from 'modules/students/entities/student.entity';
+import { ParentEntity } from 'modules/parents/entities/parent.entity';
+import { TeacherEntity } from 'modules/teachers/entities/teacher.entity';
+import { UsersController } from './user.controller';
+import { FilesService } from 'modules/files/files.service';
+import { UserDevicesEntity } from './entities/user-devices.entity';
+import { UserRepository } from './user.repository';
+
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([
+      UserEntity,
+      UserDevicesEntity,
+      StudentEntity,
+      ParentEntity,
+      TeacherEntity
+    ])
+  ],
+  controllers: [UsersController],
+  providers: [UsersService, FilesService, UserRepository],
+  exports: [UsersService]
+})
+export class UsersModule { }

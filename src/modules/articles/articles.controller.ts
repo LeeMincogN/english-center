@@ -1,0 +1,40 @@
+import { Controller, Get, Post, Body, Patch, Param, Delete, Query } from '@nestjs/common';
+import { ArticlesService } from './articles.service';
+import { CreateArticleDto } from './dto/create-article.dto';
+import { UpdateArticleDto } from './dto/update-article.dto';
+import { QueryDto } from '@/utils/types/query.dto';
+import { FilterArticleDto, SortArticleDto } from './dto/query-article.dto';
+import { Public, Roles } from '@/decorator/customize.decorator';
+import { RoleEnum } from '@/modules/roles/roles.enum';
+
+@Controller('articles')
+export class ArticlesController {
+  constructor(private readonly articlesService: ArticlesService) { }
+
+  @Post()
+  create(@Body() createArticleDto: CreateArticleDto) {
+    return this.articlesService.create(createArticleDto);
+  }
+
+  @Get()
+  @Public()
+  findAll(@Query() query: QueryDto<FilterArticleDto, SortArticleDto>) {
+    return this.articlesService.findAll(query);
+  }
+
+  @Get(':id')
+  @Public()
+  findOne(@Param('id') id: string) {
+    return this.articlesService.findOne(id);
+  }
+
+  @Patch(':id')
+  update(@Param('id') id: string, @Body() updateArticleDto: UpdateArticleDto) {
+    return this.articlesService.update(id, updateArticleDto);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.articlesService.remove(id);
+  }
+}

@@ -1,0 +1,469 @@
+import { InjectRepository } from '@nestjs/typeorm';
+import { TeacherPaymentEntity } from './entities/teacher-payment.entity';
+import {
+  Between,
+  FindOptionsWhere,
+  Repository,
+  In,
+  MoreThan,
+  Raw,
+} from 'typeorm';
+import {
+  FilterTeacherPaymentDto,
+  SortTeacherPaymentDto,
+} from './dto/query-teacher-payment.dto';
+import { IPaginationOptions } from 'utils/types/pagination-options';
+import { PaginationResponseDto } from 'utils/types/pagination-response.dto';
+import { SessionEntity } from 'modules/sessions/entities/session.entity';
+import { UpdateTeacherPaymentDto } from './dto/update-teacher-payment.dto';
+import {
+  CreateTeacherPaymentDto,
+  HistoryDto,
+} from './dto/create-teacher-payment.dto';
+import { TeacherPaymentMapper } from './teacher-payments.mapper';
+import { TeacherPayment } from './teacher-payments.domain';
+import { ClassesService } from '../classes/classes.service';
+import { BadRequestException } from '@nestjs/common';
+import { I18nService } from 'nestjs-i18n';
+import { I18nTranslations } from '@/generated/i18n.generated';
+import { method } from 'lodash';
+import { PayDto } from './dto/pay-dto.dto';
+
+export class TeacherPaymentRepository {
+  constructor(
+    @InjectRepository(TeacherPaymentEntity)
+    private teacherPaymentRepository: Repository<TeacherPaymentEntity>,
+    @InjectRepository(SessionEntity)
+    private sessionRepository: Repository<SessionEntity>,
+    private classesService: ClassesService,
+    private i18nService: I18nService<I18nTranslations>,
+  ) { }
+
+  async autoUpdateTeacherPaymentRecord(session: SessionEntity) {
+    const classInfo = await this.classesService.findById(session.classId);
+    if (!classInfo || !classInfo.teacher) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.CLASS_TEACHER_NOT_FOUND'),
+      );
+    }
+
+    const month = session.date.getMonth() + 1;
+    const year = session.date.getFullYear();
+
+    // Check if there was any payment record for the teacher in the current month and year
+    let teacherPayment: TeacherPaymentEntity =
+      await this.teacherPaymentRepository.findOne({
+        where: {
+          teacherId: classInfo.teacher.id,
+          month: month,
+          year: year,
+        },
+      });
+
+    // Get total sessions for this teacher in this month/year across all classes
+    const teacherClasses = await this.classesService.findClassesByTeacherId(
+      classInfo.teacher.id,
+    );
+    const classIds = teacherClasses.map((cls) => cls.id);
+
+    let totalSessions = 0;
+    if (classIds.length > 0) {
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+
+      totalSessions = await this.sessionRepository.count({
+        where: {
+          classId: In(classIds),
+          date: Between(startDate, endDate),
+        },
+      });
+    }
+
+    // Calculate total amount based on sessions * salary per lesson
+    const totalAmount = totalSessions * classInfo.teacher.salaryPerLesson;
+
+    if (!teacherPayment) {
+      // If no record exists, create a new one
+      teacherPayment = this.teacherPaymentRepository.create({
+        month: month,
+        year: year,
+        totalAmount: totalAmount,
+        paidAmount: 0,
+        status: 'pending',
+        teacherId: classInfo.teacher.id,
+        classes: [],
+        histories: [],
+      });
+    } else {
+      // Update existing record
+      teacherPayment.totalAmount = totalAmount;
+
+      // Update status based on payment completion
+      if (teacherPayment.paidAmount >= totalAmount) {
+        teacherPayment.status = 'paid';
+      } else if (teacherPayment.paidAmount > 0) {
+        teacherPayment.status = 'partial';
+      } else {
+        teacherPayment.status = 'pending';
+      }
+    }
+
+    // Update or add class lesson information
+    const existingClassIndex = teacherPayment.classes.findIndex(
+      (cls) => cls.classId === session.classId,
+    );
+
+    const classSessionCount = await this.sessionRepository.count({
+      where: {
+        classId: session.classId,
+        date: Between(
+          new Date(year, month - 1, 1),
+          new Date(year, month, 0, 23, 59, 59, 999),
+        ),
+      },
+    });
+
+    if (existingClassIndex >= 0) {
+      teacherPayment.classes[existingClassIndex].totalLessons =
+        classSessionCount;
+    } else {
+      teacherPayment.classes.push({
+        classId: session.classId,
+        class: {
+          id: classInfo.id,
+          name: classInfo.name,
+          grade: classInfo.grade,
+          year: classInfo.year,
+          section: classInfo.section,
+          feePerLesson: classInfo.feePerLesson,
+        },
+        totalLessons: classSessionCount,
+      });
+    }
+
+    try {
+      return await this.teacherPaymentRepository.save(teacherPayment);
+    } catch (error: any) {
+      // In case of concurrent creation, unique index may be hit. Refetch and update instead.
+      const message = String(error?.message || '');
+      if (
+        message.toLowerCase().includes('duplicate') ||
+        message.toLowerCase().includes('unique')
+      ) {
+        const existing = await this.teacherPaymentRepository.findOne({
+          where: {
+            teacherId: classInfo.teacher.id,
+            month,
+            year,
+          },
+        });
+        if (existing) {
+          existing.totalAmount = totalAmount;
+          existing.classes = teacherPayment.classes;
+          return await this.teacherPaymentRepository.save(existing);
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async computeTeacherTotalAmountAndLessons(
+    teacherId: string,
+    month: number,
+    year: number,
+  ) {
+    const teacherClasses = await this.classesService.findClassesByTeacherId(
+      teacherId,
+    );
+    const classIds = teacherClasses.map((cls) => cls.id);
+
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+
+    let totalSessions = 0;
+    if (classIds.length > 0) {
+      totalSessions = await this.sessionRepository.count({
+        where: {
+          classId: In(classIds),
+          date: Between(startDate, endDate),
+        },
+      });
+    }
+
+    return { teacherClasses, classIds, startDate, endDate, totalSessions };
+  }
+  async getAllPayments({
+    filterOptions,
+    sortOptions,
+    paginationOptions,
+    classesService,
+  }: {
+    filterOptions: FilterTeacherPaymentDto | {};
+    sortOptions: SortTeacherPaymentDto[];
+    paginationOptions: IPaginationOptions;
+    classesService?: ClassesService;
+  }): Promise<PaginationResponseDto<TeacherPayment>> {
+    const where: FindOptionsWhere<TeacherPaymentEntity> = {};
+
+    // Type guard to check if filterOptions has the expected properties
+    const filters = filterOptions as FilterTeacherPaymentDto;
+
+    if (filters?.teacherId) where.teacherId = filters.teacherId;
+
+    if (filters?.teacherName) {
+      {
+        const rawName = String(filters.teacherName)
+          .trim()
+          .replace(/^"+|"+$/g, '')
+          .replace(/\s+/g, ' ');
+
+        const escaped = rawName
+          .replace(/\\/g, '\\\\')
+          .replace(/%/g, '\\%')
+          .replace(/_/g, '\\_');
+
+        where.teacher = {
+          name: Raw((alias) => `${alias} ILIKE :teacherName ESCAPE '\\'`, {
+            teacherName: `%${escaped}%`,
+          }),
+        };
+      }
+    }
+
+    if (filters?.status) where.status = filters.status;
+
+    if (filters?.month) where.month = filters.month;
+
+    if (filters?.year) where.year = filters.year;
+
+    if (filters?.startMonth && filters?.endMonth && filters?.year) {
+      where.month = Between(filters.startMonth, filters.endMonth);
+      where.year = filters.year;
+    }
+
+    const [entities, total] = await this.teacherPaymentRepository.findAndCount({
+      where: { ...where, totalAmount: MoreThan(0) },
+      relations: ['teacher'],
+      skip: (paginationOptions.page - 1) * paginationOptions.limit || 0,
+      take: paginationOptions.limit,
+      order:
+        sortOptions.length > 0
+          ? sortOptions.reduce((acc, sort) => {
+            acc[sort.orderBy] = sort.order;
+            return acc;
+          }, {})
+          : { year: 'DESC', month: 'DESC' },
+    });
+
+    // Calculate statistics from all records matching filters (not paginated)
+    const allEntities = await this.teacherPaymentRepository.find({
+      where: { ...where, totalAmount: MoreThan(0) },
+      relations: ['teacher'],
+    });
+
+    const statistics = {
+      totalAmount: allEntities.reduce(
+        (sum, e) => sum + (e.totalAmount || 0),
+        0,
+      ),
+      paidAmount: allEntities.reduce((sum, e) => sum + (e.paidAmount || 0), 0),
+      remainingAmount: allEntities.reduce(
+        (sum, e) => sum + ((e.totalAmount || 0) - (e.paidAmount || 0)),
+        0,
+      ),
+    };
+
+    const totalItems = total;
+    const totalPages = Math.ceil(totalItems / paginationOptions.limit) || 1;
+    return {
+      meta: {
+        limit: paginationOptions.limit || null,
+        page: paginationOptions.page || null,
+        totalPages,
+        totalItems,
+      },
+      result: entities
+        ? entities.map((item) => TeacherPaymentMapper.toDomain(item))
+        : [],
+      statistics,
+    };
+  }
+
+  async createPayment(createPaymentDto: CreateTeacherPaymentDto) {
+    const payment = this.teacherPaymentRepository.create(createPaymentDto);
+    return this.teacherPaymentRepository.save(payment);
+  }
+
+  async updatePayment(
+    id: TeacherPaymentEntity['id'],
+    updatePaymentDto: UpdateTeacherPaymentDto,
+  ) {
+    const oldPayment = await this.teacherPaymentRepository.findOne({
+      where: { id },
+    });
+
+    if (!oldPayment) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.PAYMENT_NOT_FOUND'),
+      );
+    }
+
+    if (oldPayment.status === 'paid') {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.PAYMENT_ALREADY_COMPLETED'),
+      );
+    }
+
+    if (updatePaymentDto.paidAmount && updatePaymentDto.paidAmount > 0) {
+      const remainingAmount = oldPayment.totalAmount - oldPayment.paidAmount;
+      if (updatePaymentDto.paidAmount > remainingAmount) {
+        throw new BadRequestException(
+          this.i18nService.t('teacherPayment.FAIL.EXCEED_AMOUNT'),
+        );
+      }
+
+      const newHistory = {
+        method: updatePaymentDto.histories?.[0]?.method || 'bank_transfer',
+        amount: updatePaymentDto.paidAmount,
+        note: updatePaymentDto.histories?.[0]?.note || '',
+        date: new Date(),
+      };
+
+      const updatedPayment = this.teacherPaymentRepository.merge(oldPayment, {
+        ...updatePaymentDto,
+        histories: [...oldPayment.histories, newHistory],
+      });
+
+      return await this.teacherPaymentRepository.save(updatedPayment);
+    }
+
+    const updatedPayment = this.teacherPaymentRepository.merge(
+      oldPayment,
+      updatePaymentDto,
+    );
+    return await this.teacherPaymentRepository.save(updatedPayment);
+  }
+
+  async deletePayment(id: TeacherPaymentEntity['id']) {
+    return this.teacherPaymentRepository.delete(id);
+  }
+
+  async getPaymentById(id: TeacherPaymentEntity['id']) {
+    return TeacherPaymentMapper.toDomain(
+      await this.teacherPaymentRepository.findOne({
+        where: { id },
+        relations: ['teacher'],
+      }),
+    );
+  }
+
+  async getAllPaymentsReport({
+    filterOptions,
+    sortOptions,
+    paginationOptions,
+  }: {
+    filterOptions: FilterTeacherPaymentDto | {};
+    sortOptions: SortTeacherPaymentDto[];
+    paginationOptions: IPaginationOptions;
+  }) {
+    const where: FindOptionsWhere<TeacherPaymentEntity> = {};
+    const filters = filterOptions as FilterTeacherPaymentDto;
+
+    if (filters?.teacherId) where.teacherId = filters.teacherId;
+
+    if (filters?.teacherName) {
+      {
+        const rawName = String(filters.teacherName)
+          .trim()
+          .replace(/^"+|"+$/g, '')
+          .replace(/\s+/g, ' ');
+
+        const escaped = rawName
+          .replace(/\\/g, '\\\\')
+          .replace(/%/g, '\\%')
+          .replace(/_/g, '\\_');
+
+        where.teacher = {
+          name: Raw((alias) => `${alias} ILIKE :teacherName ESCAPE '\\'`, {
+            teacherName: `%${escaped}%`,
+          }),
+        };
+      }
+    }
+
+    if (filters?.status) where.status = filters.status;
+
+    if (filters?.month) where.month = filters.month;
+
+    if (filters?.year) where.year = filters.year;
+
+    if (filters?.startMonth && filters?.endMonth && filters?.year) {
+      where.month = Between(filters.startMonth, filters.endMonth);
+      where.year = filters.year;
+    }
+    const entities = await this.teacherPaymentRepository.find({
+      where: { ...where, totalAmount: MoreThan(0) },
+      relations: ['teacher'],
+      order:
+        sortOptions.length > 0
+          ? sortOptions.reduce((acc, sort) => {
+            acc[sort.orderBy] = sort.order;
+            return acc;
+          }, {})
+          : { year: 'DESC', month: 'DESC' },
+    });
+    return entities.map((item) => TeacherPaymentMapper.toDomain(item));
+  }
+
+  async payForTeacher(id: TeacherPaymentEntity['id'], payDto: PayDto) {
+    const payment = await this.teacherPaymentRepository.findOne({
+      where: { id },
+      relations: ['teacher'],
+    });
+
+    if (!payment) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.PAYMENT_NOT_FOUND'),
+      );
+    }
+
+    if (!payment.teacher) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.CLASS_TEACHER_NOT_FOUND'),
+      );
+    }
+
+    if (!payDto || typeof payDto.amount !== 'number' || payDto.amount <= 0) {
+      throw new BadRequestException('Invalid amount');
+    }
+
+    if (payDto.amount > payment.totalAmount - payment.paidAmount) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.EXCEED_AMOUNT'),
+      );
+    }
+
+    if (
+      payment.status === 'paid' ||
+      payment.totalAmount - payment.paidAmount <= 0
+    ) {
+      throw new BadRequestException(
+        this.i18nService.t('teacherPayment.FAIL.PAYMENT_ALREADY_COMPLETED'),
+      );
+    }
+
+    const newHistory = {
+      method: payDto.method || 'bank_transfer',
+      amount: payDto.amount,
+      note: payDto.note || '',
+      date: new Date(),
+    };
+
+    payment.histories = Array.isArray(payment.histories)
+      ? [...payment.histories, newHistory]
+      : [newHistory];
+
+    const saved = await this.teacherPaymentRepository.save(payment);
+    return TeacherPaymentMapper.toDomain(saved);
+  }
+}

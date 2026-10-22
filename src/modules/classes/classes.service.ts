@@ -1,0 +1,233 @@
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { CreateClassDto } from './dto/create-class.dto';
+import { UpdateClassDto } from './dto/update-class.dto';
+import { ClassRepository } from './class.repository';
+import { FilterClassDto, SortClassDto } from './dto/query-class.dto';
+import { IPaginationOptions } from 'utils/types/pagination-options';
+import { PaginationResponseDto } from 'utils/types/pagination-response.dto';
+import { Class, Schedule } from './class.domain';
+import { Teacher } from 'modules/teachers/teacher.domain';
+import { TeachersService } from 'modules/teachers/teachers.service';
+import { StudentsService } from 'modules/students/students.service';
+import { AddStudentsDto } from './dto/add-students.dto';
+import { Student } from 'modules/students/student.domain';
+import {
+  FilterStudentDto,
+  SortStudentDto,
+} from 'modules/students/dto/query-student.dto';
+import { I18nService } from 'nestjs-i18n';
+import { I18nTranslations } from '@/generated/i18n.generated';
+import { hasScheduleConflict } from './utils/schedule-conflict';
+
+@Injectable()
+export class ClassesService {
+  constructor(
+    private classRepository: ClassRepository,
+    private teachersService: TeachersService,
+    private studentsService: StudentsService,
+    private i18nService: I18nService<I18nTranslations>,
+  ) {}
+  create(createClassDto: CreateClassDto) {
+    return this.classRepository.create(createClassDto);
+  }
+
+  findAll({
+    filterOptions,
+    sortOptions,
+    paginationOptions,
+  }: {
+    filterOptions?: FilterClassDto | null;
+    sortOptions?: SortClassDto[] | null;
+    paginationOptions: IPaginationOptions;
+  }): Promise<PaginationResponseDto<Class>> {
+    return this.classRepository.findManyWithPagination({
+      filterOptions,
+      sortOptions,
+      paginationOptions,
+    });
+  }
+
+  async findOne(id: Class['id']) {
+    const result = await this.classRepository.findById(id);
+    if (!result)
+      throw new BadRequestException(this.i18nService.t('class.FAIL.NOT_FOUND'));
+    return result;
+  }
+
+  async findById(id: Class['id']) {
+    const result = await this.classRepository.findWithoutMapper(id);
+    if (!result)
+      throw new BadRequestException(this.i18nService.t('class.FAIL.NOT_FOUND'));
+    return result;
+  }
+
+  update(id: Class['id'], updateClassDto: UpdateClassDto) {
+    return this.classRepository.update(id, updateClassDto);
+  }
+
+  async assignTeacherToClass(id: Class['id'], teacherId: Teacher['id']) {
+    const aclass = await this.classRepository.findById(id);
+    if (aclass && aclass.teacher && aclass.teacher.id === teacherId) {
+      throw new BadRequestException(
+        this.i18nService.t('class.FAIL.TEACHER_ALREADY_ASSIGNED'),
+      );
+    }
+    const teacher = await this.teachersService.findOne(teacherId);
+    if (!teacher) {
+      throw new BadRequestException(this.i18nService.t('user.FAIL.NOT_FOUND'));
+    }
+    if (!teacher.isActive) {
+      throw new BadRequestException(
+        this.i18nService.t('class.FAIL.TEACHER_INACTIVE_CANNOT_ASSIGN'),
+      );
+    }
+
+    const teacherClasses = await this.classRepository.findClassesByTeacherId(
+      teacherId,
+    );
+    for (const eachClass of teacherClasses) {
+      if (eachClass.id === id) continue;
+      if (hasScheduleConflict(eachClass.schedule, aclass.schedule)) {
+        throw new BadRequestException(
+          this.i18nService.t('class.FAIL.TEACHER_SCHEDULE_CONFLICT', {
+            args: {
+              teacherName: teacher.name,
+              conflictClassName: eachClass.name,
+              className: aclass.name,
+            },
+          }),
+        );
+      }
+    }
+
+    const result = await this.classRepository.assignTeacherToClass(id, teacher);
+    return result;
+  }
+
+  async unassignTeacherToClass(id: Class['id'], teacherId: Teacher['id']) {
+    const teacher = await this.teachersService.findOne(teacherId);
+    const result = await this.classRepository.unassignTeacherToClass(
+      id,
+      teacher,
+    );
+    if (!result) {
+      throw new BadRequestException(
+        this.i18nService.t('class.FAIL.TEACHER_NOT_ASSIGNED'),
+      );
+    }
+    return result;
+  }
+
+  async getAvailableToAddStudents(
+    id: Class['id'],
+    {
+      filterOptions,
+      sortOptions,
+      paginationOptions,
+    }: {
+      filterOptions: FilterStudentDto;
+      sortOptions: SortStudentDto[];
+      paginationOptions: IPaginationOptions;
+    },
+  ) {
+    const students = await this.studentsService.findAll({
+      filterOptions,
+      sortOptions,
+      paginationOptions,
+    });
+    const classSchedule = await this.classRepository.findById(id);
+
+    return {
+      students,
+      classSchedule,
+    };
+  }
+
+  async addStudentsToClass(id: Class['id'], students: AddStudentsDto[]) {
+    const aclass = await this.classRepository.findById(id);
+    const studentIds = students.map((item) => item.studentId);
+    const studenstList = await this.studentsService.findStudents(studentIds);
+
+    //check schedule conflict of each student is passed
+    for (const student of studenstList) {
+      //check each class of a student
+      for (const eachClass of student.classes) {
+        if (eachClass.class.id === aclass.id)
+          throw new BadRequestException(
+            this.i18nService.t('class.FAIL.STUDENT_ALREADY_IN_CLASS'),
+          );
+
+        if (hasScheduleConflict(eachClass.class.schedule, aclass.schedule)) {
+          throw new BadRequestException(
+            this.i18nService.t('class.FAIL.SCHEDULE_CONFLICT', {
+              args: {
+                studentName: student.name,
+                conflictClassName: eachClass.class.name,
+                className: aclass.name,
+              },
+            }),
+          );
+        }
+      }
+    }
+    return await this.classRepository.addStudentsToClass(id, students);
+  }
+
+  async removeStudentsFromClass(id: Class['id'], students: Student['id'][]) {
+    return this.classRepository.removeStudentsFromClass(id, students);
+  }
+
+  async updateClassStatus() {
+    const classes = await this.classRepository.findAll();
+    for (const aclass of classes) {
+      const now = Date.now();
+      const startDate = new Date(aclass.schedule.start_date).getTime();
+      const endDate = new Date(aclass.schedule.end_date).getTime();
+      let newStatus = aclass.status;
+      if (now < startDate) {
+        newStatus = 'upcoming';
+      } else if (now > endDate) {
+        newStatus = 'closed';
+      } else {
+        newStatus = 'active';
+      }
+      await this.classRepository.update(aclass.id, { status: newStatus });
+    }
+  }
+
+  async findClassesByTeacherId(teacherId: Teacher['id']) {
+    return this.classRepository.findClassesByTeacherId(teacherId);
+  }
+
+  async updateStudentStatus(
+    studentId: Student['id'],
+    classId: Class['id'],
+    isActive: boolean,
+  ) {
+    return this.classRepository.updateStudentStatus(
+      studentId,
+      classId,
+      isActive,
+    );
+  }
+
+  async getPublicClasses({
+    filterOptions,
+    sortOptions,
+    paginationOptions,
+  }: {
+    filterOptions?: FilterClassDto | null;
+    sortOptions?: SortClassDto[] | null;
+    paginationOptions: IPaginationOptions;
+  }): Promise<PaginationResponseDto<Class>> {
+    return this.classRepository.getPublicClasses({
+      filterOptions,
+      sortOptions,
+      paginationOptions,
+    });
+  }
+
+  async getInfoForBanner(id: Class['id']) {
+    return this.classRepository.getInfoForBanner(id);
+  }
+}

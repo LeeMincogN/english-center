@@ -1,0 +1,17 @@
+import { CreateUserDto } from "modules/users/dto/create-user.dto";
+
+export class CreateTeacherDto extends CreateUserDto {
+    isActive: boolean;
+
+    introduction: string;
+
+    workExperience: string;
+
+    description: string
+
+    qualifications: string[]
+
+    specializations: string[]
+
+    salaryPerLesson: number
+}

@@ -1,0 +1,136 @@
+import { Injectable } from '@nestjs/common';
+import { CreateRegistrationDto } from './dto/create-registration.dto';
+import { PaginationResponseDto } from '@/utils/types/pagination-response.dto';
+import { IPaginationOptions } from '@/utils/types/pagination-options';
+import { Registration } from './registration.domain';
+import { InjectRepository } from '@nestjs/typeorm';
+import { RegistrationEntity } from './entities/registration.entity';
+import { FindOptionsWhere, ILike, Repository } from 'typeorm';
+import { RegistrationMapper } from './registration.mapper';
+import { ClassEntity } from '../classes/entities/class.entity';
+import { NullableType } from '@/utils/types/nullable.type';
+import { UpdateRegistrationDto } from './dto/update-registration.dto';
+@Injectable()
+export class RegistrationRepository {
+  constructor(
+    @InjectRepository(RegistrationEntity)
+    private registrationRepository: Repository<RegistrationEntity>,
+    @InjectRepository(ClassEntity)
+    private classRepository: Repository<ClassEntity>,
+  ) { }
+  async create(
+    data: CreateRegistrationDto,
+  ): Promise<Registration> {
+    const classEntity = await this.classRepository.findOne({
+      where: { id: data.classId },
+    });
+
+    if (!classEntity) {
+      throw new Error('Class not found');
+    }
+    const newEntity = await this.registrationRepository.save(
+      this.registrationRepository.create({
+        name: data.name,
+        email: data.email,
+        phone: data.phone,
+        gender: data.gender,
+        address: data.address,
+        note: data.note,
+        classId: classEntity.id,
+      }),
+    );
+    return RegistrationMapper.toDomain(newEntity);
+  }
+  async findManyWithPagination({
+    filterOptions,
+    sortOptions,
+    paginationOptions,
+  }: {
+    filterOptions?: any;
+    sortOptions?: any;
+    paginationOptions?: IPaginationOptions;
+  }): Promise<PaginationResponseDto<Registration>> {
+    // logic to find all registrations
+    const where: FindOptionsWhere<RegistrationEntity> = {};
+    if (filterOptions?.email) {
+      where.email = ILike(`%${filterOptions.email}%`);
+    }
+    if (filterOptions?.name) {
+      where.name = ILike(`%${filterOptions.name}%`);
+    }
+    if (filterOptions?.processed === true) {
+      where.processed = true
+    } else if (filterOptions?.processed === false) {
+      where.processed = false;
+    }
+    if (filterOptions?.class) {
+      where.class = filterOptions.class;
+    }
+    const [entities, totalItems] =
+      await this.registrationRepository.findAndCount({
+        skip:
+          ((paginationOptions?.page || 1) - 1) *
+          (paginationOptions?.limit || 10),
+        take: paginationOptions?.limit || 10,
+        where: where,
+        relations: ['class'],
+        order: sortOptions?.reduce(
+          (accumulator, sort) => ({
+            ...accumulator,
+            [sort.orderBy]: sort.order,
+          }),
+          {},
+        ),
+      });
+    const totalPages = Math.ceil(totalItems / (paginationOptions?.limit || 10));
+    return {
+      meta: {
+        page: paginationOptions?.page || 1,
+        limit: paginationOptions?.limit || 10,
+        totalItems: totalItems,
+        totalPages: totalPages,
+      },
+      result: entities.map((entity) => RegistrationMapper.toDomain(entity)),
+    };
+  }
+
+  async findAll(): Promise<Registration[]> {
+    const entities = await this.registrationRepository.find({
+      relations: ['class'],
+    });
+    return entities.map((entity) => RegistrationMapper.toDomain(entity));
+  }
+
+  async findById(id: Registration['id']): Promise<NullableType<Registration>> {
+    const entity = await this.registrationRepository.findOne({
+      where: { id },
+      relations: ['class'],
+    });
+    return entity ? RegistrationMapper.toDomain(entity) : null;
+  }
+
+  async update(
+    id: Registration['id'],
+    data: UpdateRegistrationDto,
+  ) {
+    const existingEntity = await this.registrationRepository.findOne({
+      where: { id },
+      relations: ['class'],
+    });
+
+    // Convert domain data to persistence format if needed
+    const updateData = {
+      ...existingEntity,
+      processed: data.processed
+    };
+
+    // Save the updated entity
+    const entity = await this.registrationRepository.save(updateData);
+
+    return RegistrationMapper.toDomain(entity);
+  }
+
+  async remove(id: Registration['id']): Promise<void> {
+    await this.registrationRepository.softDelete({ id });
+  }
+}

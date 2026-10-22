@@ -1,0 +1,64 @@
+import { ClassEntity } from '@/modules/classes/entities/class.entity';
+import {
+  Column,
+  CreateDateColumn,
+  DeleteDateColumn,
+  Entity,
+  ManyToOne,
+  JoinColumn,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
+
+@Entity('registration')
+export class RegistrationEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ nullable: false })
+  email: string;
+
+  @Column({ nullable: false })
+  name: string;
+
+  @Column()
+  phone: string;
+
+  @Column({ enum: ['male', 'female'] })
+  gender: string;
+
+  @Column()
+  address: string;
+
+  @Column({ nullable: true })
+  note: string;
+
+  @Column({ default: false })
+  processed: boolean;
+
+  @CreateDateColumn({
+    type: 'timestamptz',
+    default: () => 'CURRENT_TIMESTAMP(0)',
+  })
+  createdAt: Date;
+
+  @UpdateDateColumn({
+    type: 'timestamptz',
+    default: () => 'CURRENT_TIMESTAMP(0)',
+    onUpdate: 'CURRENT_TIMESTAMP(0)',
+  })
+  updatedAt: Date;
+
+  @DeleteDateColumn({
+    type: 'timestamptz',
+    nullable: true,
+  })
+  deletedAt?: Date;
+
+  @Column({ nullable: false })
+  classId: string;
+
+  @ManyToOne(() => ClassEntity)
+  @JoinColumn({ name: 'classId' })
+  class?: ClassEntity;
+}
